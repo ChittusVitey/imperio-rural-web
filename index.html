@@ -442,10 +442,14 @@ select {
   #board-title { padding: 10px 18px; }
 }
 @media (max-width: 700px) {
-  #game { flex-direction: column; align-items: center; padding-top: 72px; }
-  #board { width:96vw;height:96vw; min-width:0; margin-right: 0;}
+  #game { flex-direction: column; align-items: center; padding-top: 68px; }
+  #board { width:98vw;height:98vw; min-width:0; margin-right: 0;}
   #sidebar { flex-direction: row; flex-wrap: wrap; align-items: flex-start; justify-content: center; gap: 10px; max-width: 100%; }
   #game-toolbar { top: 8px; right: 8px; max-width: 160px; padding: 10px; }
+  .cell .tile-label { font-size: 12px; line-height: 1.28; padding: 4px 6px 4px 5px; }
+  .cell .tile-price { font-size: 12px; }
+  .cell .tile-icon { font-size: 1.6em; top: 20px; }
+  .cell .tile-index { font-size: 10px; opacity: 0.55; }
 }
 
 /* --- TILE (CELL) --- */
@@ -1185,6 +1189,8 @@ let currentRoomSnapshot = null;
 let multiplayerMode = false;
 let applyingRemoteState = false;
 let lastShownWinnerId = "";
+const LOW_PERF_MOBILE = window.matchMedia("(max-width: 900px), (pointer: coarse)").matches;
+const RESOURCE_BUY_RATE = 50;
 
 function ensureFirebase(){
   if (rtdb) return true;
@@ -1462,6 +1468,12 @@ function updateMultiplayerButtons(){
   leaveMatchBtn.style.display = multiplayerMode ? "block" : "none";
 }
 
+function safeEffect(effectName, ...args){
+  if (!window.Effects || typeof window.Effects[effectName] !== "function") return;
+  if (LOW_PERF_MOBILE && (effectName === "moveStep" || effectName === "propertyBought")) return;
+  window.Effects[effectName](...args);
+}
+
 async function exitMultiplayerMatch(){
   if (!multiplayerMode) return;
   const ok = confirm("Deseja sair da partida e voltar ao menu multiplayer?");
@@ -1490,7 +1502,8 @@ async function startRoomGame(){
     props: [],
     color: pl.color || colors[idx],
     playerId: pl.id,
-    skipTurnsRemaining: 0
+    skipTurnsRemaining: 0,
+    bankrupt: false
   }));
   current = 0;
   awaitingDecision = false;
@@ -1589,7 +1602,8 @@ function startGame(){
       props:[],
       color:colors[i],
       playerId: "local_" + i,
-      skipTurnsRemaining: 0
+      skipTurnsRemaining: 0,
+      bankrupt: false
     });
   }
 
@@ -1697,7 +1711,8 @@ function serializeGameState(){
       pos: p.pos,
       color: p.color,
       skipTurnsRemaining: p.skipTurnsRemaining || 0,
-      playerId: p.playerId || null
+      playerId: p.playerId || null,
+      bankrupt: !!p.bankrupt
     })),
     boardProps: board.map((t)=> t.type === "prop"
       ? { owner: t.owner, level: t.level, highlight: !!t.highlight }
@@ -1722,7 +1737,8 @@ function applySerializedState(state, fromRemote){
     props: [],
     color: p.color || colors[idx % colors.length],
     playerId: p.playerId || null,
-    skipTurnsRemaining: Number.isFinite(p.skipTurnsRemaining) ? p.skipTurnsRemaining : 0
+    skipTurnsRemaining: Number.isFinite(p.skipTurnsRemaining) ? p.skipTurnsRemaining : 0,
+    bankrupt: !!p.bankrupt
   }));
   const boardProps = state.boardProps || [];
   for (let i=0;i<board.length;i++){
@@ -1753,7 +1769,7 @@ function canLocalPlayerAct(){
   if (!multiplayerMode) return true;
   const localId = ensureLocalPlayerId();
   const turnPlayer = players[current];
-  return !!turnPlayer && turnPlayer.playerId === localId;
+  return !!turnPlayer && !turnPlayer.bankrupt && turnPlayer.playerId === localId;
 }
 
 function updateDiceButtonState(){
@@ -1781,6 +1797,55 @@ function getRent(tile, boardIndex){
     r = Math.floor(r * 1.5);
   }
   return r;
+}
+
+function getSellValue(tile){
+  if (!tile || tile.type !== "prop") return 0;
+  return Math.floor(tile.price * 0.7) + (tile.level * 50);
+}
+
+function getPlayerLiquidationPotential(player){
+  if (!player) return 0;
+  return (player.money || 0) + player.props.reduce((sum, pr)=>sum + getSellValue(pr), 0);
+}
+
+function sellPropertyFromPlayer(playerIndex, propertyIndex){
+  const seller = players[playerIndex];
+  const prop = board[propertyIndex];
+  if (!seller || !prop || prop.type !== "prop" || prop.owner !== playerIndex) return 0;
+  const gain = getSellValue(prop);
+  prop.owner = null;
+  prop.level = 0;
+  prop.highlight = false;
+  seller.money += gain;
+  seller.props = seller.props.filter(p=>p !== prop);
+  return gain;
+}
+
+function markPlayerBankrupt(playerIndex){
+  const pl = players[playerIndex];
+  if (!pl || pl.bankrupt) return;
+  for (let i=0;i<board.length;i++){
+    if (board[i].type === "prop" && board[i].owner === playerIndex){
+      board[i].owner = null;
+      board[i].level = 0;
+      board[i].highlight = false;
+    }
+  }
+  pl.props = [];
+  pl.money = 0;
+  pl.bankrupt = true;
+  pl.skipTurnsRemaining = 0;
+}
+
+function getNextActivePlayerIndex(startIdx){
+  if (!players.length) return 0;
+  let idx = startIdx;
+  for (let i=0;i<players.length;i++){
+    idx = (idx + 1) % players.length;
+    if (!players[idx].bankrupt) return idx;
+  }
+  return startIdx;
 }
 
 function showOwnedPropertyInfo(tile, index){
@@ -1884,12 +1949,13 @@ function drawBoard(){
       const ownerColor = ownerPlayer?.color || colors[tileObj.owner % colors.length] || "#888";
       c.classList.add("owned-strong");
       c.style.borderColor = ownerColor;
-      c.style.boxShadow =
-        `0 0 0 3px ${ownerColor}CC,` +
-        `0 0 0 6px ${ownerColor}55,` +
-        `0 12px 28px ${ownerColor}99,` +
-        `0 0 22px ${ownerColor}AA,` +
-        `inset 0 0 0 1px rgba(255,255,255,0.28)`;
+      c.style.boxShadow = LOW_PERF_MOBILE
+        ? `0 0 0 2px ${ownerColor}AA, 0 0 0 4px ${ownerColor}44, inset 0 0 0 1px rgba(255,255,255,0.25)`
+        : `0 0 0 3px ${ownerColor}CC,` +
+          `0 0 0 6px ${ownerColor}55,` +
+          `0 12px 28px ${ownerColor}99,` +
+          `0 0 22px ${ownerColor}AA,` +
+          `inset 0 0 0 1px rgba(255,255,255,0.28)`;
       c.appendChild(makeOwnerTag(ownerColor));
     }
     if (
@@ -1982,12 +2048,17 @@ function drawSidebar(){
     let gadoBar=Math.min(1,gadoVal/12)*100;
 
     const skipN = p.skipTurnsRemaining > 0 ? p.skipTurnsRemaining : 0;
+    const isBankrupt = !!p.bankrupt;
     const skipLine = skipN
       ? `<div class="player-skip-hint">⏸️ ${skipN} rodada(s) sem jogar</div>`
+      : "";
+    const bankruptLine = isBankrupt
+      ? `<div class="player-skip-hint" style="background:rgba(196,92,72,0.22);border-color:rgba(196,92,72,0.45);color:#8b2f22;">💀 Falido (fora da partida)</div>`
       : "";
 
     d.innerHTML=`
       <b>${p.name}</b>
+      ${bankruptLine}
       ${skipLine}
       <div class="stat-line">
         <span class="stat-icon">💰</span> 
@@ -2096,8 +2167,8 @@ function move(v){
       giveLapReward(p);
     }
 
-    drawBoard();
-    Effects.moveStep();
+    drawTokens();
+    safeEffect("moveStep");
     steps--;
     setTimeout(step,170 - 8*(6-steps)); // slight slow on end
   }
@@ -2120,9 +2191,9 @@ function giveLapReward(p){
   p.gado += gadoGain;
 
   setTimeout(()=>{
-    Effects.moneyGain(moneyGain, sidebar.children[current]);
-    if(trigoGain) Effects.resourceGain("trigo", trigoGain, sidebar.children[current]);
-    if(gadoGain)  Effects.resourceGain("gado", gadoGain, sidebar.children[current]);
+    safeEffect("moneyGain", moneyGain, sidebar.children[current]);
+    if(trigoGain) safeEffect("resourceGain", "trigo", trigoGain, sidebar.children[current]);
+    if(gadoGain)  safeEffect("resourceGain", "gado", gadoGain, sidebar.children[current]);
   },240);
 
   popup(`
@@ -2234,12 +2305,28 @@ function handleTile(p){
 
       awaitingDecision=true;
       tile.highlight = true;
+      const buyWithResType = tile.propType === "pasture" ? "trigo" : "gado";
+      const buyWithResLabel = tile.propType === "pasture" ? "trigo" : "gado";
+      const resourceNeeded = Math.ceil(tile.price / RESOURCE_BUY_RATE);
+      const canTradeResource = p.money < tile.price && (p[buyWithResType] || 0) >= resourceNeeded;
+      const tradeButton = canTradeResource
+        ? `<button onclick="buyWithResource()" class="animated">Trocar ${resourceNeeded} ${buyWithResLabel} para comprar</button>`
+        : "";
+      const tradeHint = p.money < tile.price
+        ? `<p style="font-size:0.92em;line-height:1.45;margin:6px 0 10px 0;">
+            Sem saldo para comprar com dinheiro?<br>
+            Esta casa pode ser comprada com <b>${buyWithResLabel}</b> (${RESOURCE_BUY_RATE} = R$1 unidade).<br>
+            Necessário: <b>${resourceNeeded} ${buyWithResLabel}</b>.
+          </p>`
+        : "";
 
       popup(`
         <div class="popup-icon">🏡</div>
         <h3>Comprar: ${tile.name || "propriedade"}</h3>
         <p style="font-size:20px;letter-spacing:.5px;font-weight:700;color:#be9505;">Valor: R$${tile.price}</p>
+        ${tradeHint}
         <button onclick="buy()" class="animated">Comprar</button>
+        ${tradeButton}
         <button onclick="endDecision()" class="close-btn">Passar</button>
       `);
 
@@ -2252,7 +2339,7 @@ function handleTile(p){
           tile.owner=current;
           activePlayer.props.push(tile);
 
-          Effects.moneyLose(tile.price, sidebar.children[current]);
+          safeEffect("moneyLose", tile.price, sidebar.children[current]);
           if(boardDiv.children.length>0){
             let cell = boardDiv.children[p.pos];
             if(cell){
@@ -2260,8 +2347,32 @@ function handleTile(p){
               burst.className="tile-highlight";
               cell.appendChild(burst);
               setTimeout(()=>burst.remove(),690);
-              Effects.propertyBought(cell, activePlayer.color);
+              safeEffect("propertyBought", cell, activePlayer.color);
             }
+          }
+        }
+        syncMultiplayerState();
+        endDecision();
+      };
+      window.buyWithResource=()=>{
+        if (!canLocalPlayerAct()) return;
+        const activePlayer = players[current];
+        if(!activePlayer) return;
+        const resourceKey = tile.propType === "pasture" ? "trigo" : "gado";
+        const needed = Math.ceil(tile.price / RESOURCE_BUY_RATE);
+        if ((activePlayer[resourceKey] || 0) < needed) return;
+        activePlayer[resourceKey] -= needed;
+        tile.owner=current;
+        activePlayer.props.push(tile);
+        if(resourceKey === "trigo"){
+          safeEffect("resourceGain", "trigo", -needed, sidebar.children[current]);
+        } else {
+          safeEffect("resourceGain", "gado", -needed, sidebar.children[current]);
+        }
+        if(boardDiv.children.length>0){
+          let cell = boardDiv.children[p.pos];
+          if(cell){
+            safeEffect("propertyBought", cell, activePlayer.color);
           }
         }
         syncMultiplayerState();
@@ -2271,19 +2382,97 @@ function handleTile(p){
     } else if(tile.owner!==current){
 
       let rent=getRent(tile, p.pos);
-      p.money-=rent;
-      players[tile.owner].money+=rent;
-
-      Effects.moneyLose(rent, sidebar.children[current]);
-      Effects.moneyGain(rent, sidebar.children[tile.owner]);
-
-      popup(
-        `<div class="popup-icon">💸</div>
-        <h3>Aluguel: ${tile.name || "propriedade"}</h3>
-        <div style="font-size:1.15em;">Você pagou <b style="color:#be9505;">R$${rent}</b> ao dono.${activeRentBuff && activeRentBuff.propertyIndex === p.pos ? "<br><small>Este valor inclui o buff de <b>+50%</b> do mercado aquecido.</small>" : ""}</div>
-        <button onclick="endDecision()" class="animated">OK</button>`
-      );
+      const activePlayer = players[current];
+      const ownerPlayer = players[tile.owner];
+      const canPayNow = activePlayer.money >= rent;
       awaitingDecision=true;
+
+      if (canPayNow) {
+        activePlayer.money-=rent;
+        ownerPlayer.money+=rent;
+        safeEffect("moneyLose", rent, sidebar.children[current]);
+        safeEffect("moneyGain", rent, sidebar.children[tile.owner]);
+        popup(
+          `<div class="popup-icon">💸</div>
+          <h3>Aluguel: ${tile.name || "propriedade"}</h3>
+          <div style="font-size:1.15em;">Você pagou <b style="color:#be9505;">R$${rent}</b> ao dono.${activeRentBuff && activeRentBuff.propertyIndex === p.pos ? "<br><small>Este valor inclui o buff de <b>+50%</b> do mercado aquecido.</small>" : ""}</div>
+          <button onclick="endDecision()" class="animated">OK</button>`
+        );
+      } else {
+        const maxPotential = getPlayerLiquidationPotential(activePlayer);
+        if (maxPotential < rent) {
+          const paidBeforeBankruptcy = Math.max(0, activePlayer.money);
+          if (paidBeforeBankruptcy > 0) {
+            ownerPlayer.money += paidBeforeBankruptcy;
+            safeEffect("moneyGain", paidBeforeBankruptcy, sidebar.children[tile.owner]);
+          }
+          markPlayerBankrupt(current);
+          popup(`
+            <div class="popup-icon">💀</div>
+            <h3>Falência!</h3>
+            <div style="font-size:1.06em;line-height:1.55;text-align:left;">
+              ${activePlayer.name} não conseguiu pagar o aluguel de <b>R$${rent}</b>, mesmo vendendo todas as propriedades possíveis.<br>
+              O jogador foi declarado <b>falido</b> e está fora da partida.
+            </div>
+            <button onclick="endDecision()" class="animated">Continuar</button>
+          `);
+          syncMultiplayerState();
+          drawBoard();
+          return;
+        }
+
+        const showSellPopup = () => {
+          const playerNow = players[current];
+          if (!playerNow) return;
+          if (playerNow.money >= rent) {
+            playerNow.money -= rent;
+            ownerPlayer.money += rent;
+            safeEffect("moneyLose", rent, sidebar.children[current]);
+            safeEffect("moneyGain", rent, sidebar.children[tile.owner]);
+            popup(`
+              <div class="popup-icon">✅💸</div>
+              <h3>Aluguel quitado</h3>
+              <div style="font-size:1.05em;line-height:1.55;text-align:left;">
+                Após vender propriedades, ${playerNow.name} pagou <b>R$${rent}</b> para ${ownerPlayer.name}.
+              </div>
+              <button onclick="endDecision()" class="animated">OK</button>
+            `);
+            syncMultiplayerState();
+            drawBoard();
+            return;
+          }
+          const sellable = board
+            .map((prop, idx)=>({prop, idx}))
+            .filter(item=>item.prop.type==="prop" && item.prop.owner===current);
+          const optionsHtml = sellable.map(item=>{
+            const val = getSellValue(item.prop);
+            return `<button onclick="sellPropertyForRent(${item.idx})" class="animated" style="margin:6px 0;width:100%;text-align:left;">
+              Vender: ${item.prop.name || ("Propriedade #" + item.idx)}<br>
+              <small>Recebe: R$${val}</small>
+            </button>`;
+          }).join("");
+          popup(`
+            <div class="popup-icon">🏷️</div>
+            <h3>Venda obrigatória</h3>
+            <div style="font-size:1.03em;line-height:1.5;text-align:left;margin-bottom:10px;">
+              Você precisa pagar <b>R$${rent}</b> de aluguel, mas tem apenas <b>R$${playerNow.money}</b>.<br>
+              Venda propriedades até atingir o valor necessário.
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;max-height:280px;overflow:auto;">
+              ${optionsHtml}
+            </div>
+          `);
+        };
+        window.sellPropertyForRent = (propertyIndex) => {
+          if (!canLocalPlayerAct()) return;
+          const gain = sellPropertyFromPlayer(current, propertyIndex);
+          if (gain > 0) safeEffect("moneyGain", gain, sidebar.children[current]);
+          syncMultiplayerState();
+          drawBoard();
+          showSellPopup();
+        };
+        showSellPopup();
+      }
 
     } else {
       awaitingDecision=true;
@@ -2312,7 +2501,7 @@ function handleTile(p){
         }
         tile.level++;
         activePlayer.money-=100;
-        Effects.moneyLose(100, sidebar.children[current]);
+        safeEffect("moneyLose", 100, sidebar.children[current]);
         syncMultiplayerState();
         endDecision();
       };
@@ -2324,59 +2513,59 @@ function handleTile(p){
     const events = [
       {
         desc: "🌧️ Chuva abundante! As nuvens trouxeram uma temporada fértil e sua colheita de trigo foi excelente (+4 trigo).",
-        effect: ()=>{p.trigo+=4; Effects.resourceGain("trigo", 4, sidebar.children[current]); }
+        effect: ()=>{p.trigo+=4; safeEffect("resourceGain", "trigo", 4, sidebar.children[current]); }
       },
       {
         desc: "🐂 Bezerros nasceram! Seu rebanho está crescendo, fortalecendo sua fazenda (+3 gado).",
-        effect: ()=>{p.gado+=3; Effects.resourceGain("gado", 3, sidebar.children[current]); }
+        effect: ()=>{p.gado+=3; safeEffect("resourceGain", "gado", 3, sidebar.children[current]); }
       },
       {
         desc: "💰 Venda especial! Você fechou um ótimo negócio e vendeu sua produção acima do preço comum (+$250).",
-        effect: ()=>{p.money+=250; Effects.moneyGain(250, sidebar.children[current]); }
+        effect: ()=>{p.money+=250; safeEffect("moneyGain", 250, sidebar.children[current]); }
       },
       {
         desc: "🌪️ Tempestade forte! A ventania devastou parte das plantações e você perdeu até 3 unidades de trigo.",
-        effect: ()=>{let loss = Math.min(3, p.trigo); p.trigo-=loss; if (loss) Effects.resourceGain("trigo", loss, sidebar.children[current]); }
+        effect: ()=>{let loss = Math.min(3, p.trigo); p.trigo-=loss; if (loss) safeEffect("resourceGain", "trigo", -loss, sidebar.children[current]); }
       },
       {
         desc: "🐄 Surto de doença! Infelizmente, parte do seu gado não resistiu e você perdeu até 2 cabeças.",
-        effect: ()=>{let loss = Math.min(2, p.gado); p.gado-=loss; if (loss) Effects.resourceGain("gado", loss, sidebar.children[current]); }
+        effect: ()=>{let loss = Math.min(2, p.gado); p.gado-=loss; if (loss) safeEffect("resourceGain", "gado", -loss, sidebar.children[current]); }
       },
       {
         desc: "🔧 Maquinário precisando de reparos! Um equipamento se quebrou e você teve custos de manutenção (-$180).",
-        effect: ()=>{p.money-=180; Effects.moneyLose(180, sidebar.children[current]); }
+        effect: ()=>{p.money-=180; safeEffect("moneyLose", 180, sidebar.children[current]); }
       },
       {
         desc: "🎯 Prêmio da feira! Sua produção se destacou e você foi premiado na feira agrícola (+$300).",
-        effect: ()=>{p.money+=300; Effects.moneyGain(300, sidebar.children[current]); }
+        effect: ()=>{p.money+=300; safeEffect("moneyGain", 300, sidebar.children[current]); }
       },
       {
         desc: "🦗 Praga inesperada! As lavouras foram atacadas e parte do trigo se perdeu (até -2 trigo).",
-        effect: ()=>{let loss = Math.min(2, p.trigo); p.trigo-=loss; if (loss) Effects.resourceGain("trigo", loss, sidebar.children[current]); }
+        effect: ()=>{let loss = Math.min(2, p.trigo); p.trigo-=loss; if (loss) safeEffect("resourceGain", "trigo", -loss, sidebar.children[current]); }
       },
       {
         desc: "💸 Recolhimento de impostos! É hora de contribuir com o governo, pague seu imposto rural (-$100).",
-        effect: ()=>{p.money-=100; Effects.moneyLose(100, sidebar.children[current]); }
+        effect: ()=>{p.money-=100; safeEffect("moneyLose", 100, sidebar.children[current]); }
       },
       {
         desc: "🚚 Logística eficiente! Você conseguiu escoar a produção rapidamente e obteve lucro extra (+$120).",
-        effect: ()=>{p.money+=120; Effects.moneyGain(120, sidebar.children[current]); }
+        effect: ()=>{p.money+=120; safeEffect("moneyGain", 120, sidebar.children[current]); }
       },
       {
         desc: "☀️ Seca leve! Houve pouco impacto graças ao seu preparo, mas você perdeu 1 unidade de trigo.",
-        effect: ()=>{let loss = Math.min(1, p.trigo); p.trigo-=loss; if (loss) Effects.resourceGain("trigo", loss, sidebar.children[current]); }
+        effect: ()=>{let loss = Math.min(1, p.trigo); p.trigo-=loss; if (loss) safeEffect("resourceGain", "trigo", -loss, sidebar.children[current]); }
       },
       {
         desc: "🌱 Novas sementes! Você recebeu sementes aprimoradas, o que eleva sua próxima produção (+2 trigo).",
-        effect: ()=>{p.trigo+=2; Effects.resourceGain("trigo", 2, sidebar.children[current]); }
+        effect: ()=>{p.trigo+=2; safeEffect("resourceGain", "trigo", 2, sidebar.children[current]); }
       },
       {
         desc: "🧑‍🌾 Novos trabalhadores! A contratação de bons peões multiplicou seus resultados (+$80, +1 trigo, +1 gado).",
-        effect: ()=>{p.money+=80; p.trigo+=1; p.gado+=1; Effects.moneyGain(80, sidebar.children[current]); Effects.resourceGain("trigo", 1, sidebar.children[current]); Effects.resourceGain("gado", 1, sidebar.children[current]);}
+        effect: ()=>{p.money+=80; p.trigo+=1; p.gado+=1; safeEffect("moneyGain", 80, sidebar.children[current]); safeEffect("resourceGain", "trigo", 1, sidebar.children[current]); safeEffect("resourceGain", "gado", 1, sidebar.children[current]);}
       },
       {
         desc: "🔥 Incêndio acidental! Um fogo inesperado causou perdas financeiras (até -$100 do seu saldo).",
-        effect: ()=>{let mloss = Math.min(100, p.money); p.money-=mloss; if (mloss) Effects.moneyLose(mloss, sidebar.children[current]); }
+        effect: ()=>{let mloss = Math.min(100, p.money); p.money-=mloss; if (mloss) safeEffect("moneyLose", mloss, sidebar.children[current]); }
       }
     ];
 
@@ -2414,7 +2603,7 @@ async function endDecision(){
   }
 
   if(!extraTurnPending){
-    current=(current+1)%players.length;
+    current = getNextActivePlayerIndex(current);
   }else{
     extraTurnPending=false;
   }
@@ -2425,8 +2614,21 @@ async function endDecision(){
 
 /*--- VITORIA ---*/
 function checkVictory(){
+  const alivePlayers = players.filter(p=>!p.bankrupt);
+  if (alivePlayers.length === 1) {
+    const winnerPlayer = alivePlayers[0];
+    const winnerIdx = players.indexOf(winnerPlayer);
+    return {
+      index: winnerIdx,
+      playerId: winnerPlayer.playerId || ("player_" + winnerIdx),
+      name: winnerPlayer.name,
+      color: winnerPlayer.color || colors[winnerIdx % colors.length],
+      reason: "Foi o último jogador ativo após as falências."
+    };
+  }
   for (let i=0;i<players.length;i++){
     const p = players[i];
+    if (p.bankrupt) continue;
     if(p.money>=3000){
       return {
         index: i,
