@@ -1128,13 +1128,13 @@ select {
 <div id="rulesLayer" onclick="if(event.target===this) closeRules()">
   <div id="rulesPanel" onclick="event.stopPropagation()">
     <h2>Regras do jogo</h2>
-    <p><b>Objetivo.</b> Ser o primeiro a acumular R$ 3.000,00 ou 10 propriedades.</p>
-    <p><b>Turno.</b> Use <b>Rolar</b> e avance o número de casas igual à soma dos dois dados. Se sair o mesmo valor nos dois dados, o jogador ganha <b>mais um turno</b> após concluir a jogada dele.</p>
-    <p><b>Propriedades.</b> Fazendas (trigo) e pastos (gado) têm preço e nome no tabuleiro, no estilo das avenidas do Banco Imobiliário. Pode <b>comprar</b> se a casa estiver vazia; se for de outro, paga <b>aluguel</b> (cerca de 20% do preço, vezes o nível de melhoria); se for sua, pode <b>melhorar</b> com R$ 100.</p>
-    <p><b>Produção.</b> Cada propriedade gera <b>trigo</b> (fazenda) ou <b>gado</b> (pasto) a cada <b>volta completa</b> no tabuleiro, conforme o nível. Na volta, você ainda recebe bônus de dinheiro e as suas terras são destacadas no tabuleiro.</p>
-    <p><b>Eventos e sorte.</b> Nas casas de <b>evento</b>, acontece algo aleatório. Clique em propriedade já <b>comprada</b> para ver aluguel e geração por volta.</p>
-    <p><b>Casas especiais.</b> Nas casas <b>10</b> e <b>30</b>, quem cair fica <b>2 rodadas</b> sem jogar (ao chegar sua vez, use <b>Rolar</b> para registrar cada rodada “perdida”). Na casa <b>20</b>, você escolhe uma propriedade sua para receber <b>+50% de aluguel</b> até outro jogador cair nessa mesma casa e escolher a propriedade dele.</p>
-    <p><b>Fim de jogo.</b> Quem atingir o objetivo vence. Use <b>Reiniciar</b> para nova partida com os mesmos jogadores, ou <b>Voltar ao menu</b> para mudar o número de pessoas e nomes.</p>
+    <p><b>Objetivo.</b> Seja o primeiro a alcançar <b>R$ 3.000,00</b> ou conquistar <b>10 propriedades</b>.</p>
+    <p><b>Turno.</b> Clique em <b>Rolar</b> e avance o total da soma dos dois dados. Se os dados forem iguais, você ganha <b>um turno extra</b> após concluir sua jogada.</p>
+    <p><b>Propriedades.</b> Fazendas (🌾) e pastos (🐄) têm preço e nome no tabuleiro. Se a casa estiver livre, você pode <b>comprar</b>. Se pertencer a outro jogador, paga <b>aluguel</b> (base de 20% do preço, multiplicado pelo nível). Se for sua, pode <b>melhorar</b> por R$ 100.</p>
+    <p><b>Produção.</b> A cada volta completa no tabuleiro, suas propriedades geram recursos conforme o nível: fazendas produzem <b>trigo</b> e pastos produzem <b>gado</b>. Você também recebe bônus de dinheiro na volta.</p>
+    <p><b>Eventos e sorte.</b> Ao cair em casa de <b>evento</b>, um efeito aleatório é aplicado. Você pode clicar em uma propriedade comprada para ver aluguel e produção por rodada.</p>
+    <p><b>Casas especiais.</b> Nas casas <b>10</b> e <b>30</b>, o jogador fica <b>2 rodadas</b> sem jogar (ao chegar sua vez, clique em <b>Rolar</b> para registrar cada rodada suspensa). Na casa <b>20</b>, escolha uma propriedade sua para receber <b>+50% de aluguel</b> até outro jogador ativar esse mesmo efeito.</p>
+    <p><b>Fim de jogo.</b> No modo local, você pode reiniciar ou voltar ao menu. No modo multiplayer, quando houver vencedor, todos veem o resultado e retornam automaticamente ao lobby da sala.</p>
     <button type="button" class="rules-close close-btn" onclick="closeRules()">Fechar</button>
   </div>
 </div>
@@ -1184,6 +1184,7 @@ let currentStateUnsub = null;
 let currentRoomSnapshot = null;
 let multiplayerMode = false;
 let applyingRemoteState = false;
+let lastShownWinnerId = "";
 
 function ensureFirebase(){
   if (rtdb) return true;
@@ -1348,6 +1349,14 @@ async function connectToRoom(code){
       menu.style.display = "none";
       game.style.display = "flex";
       applySerializedState(room.state, true);
+    } else if (room.status === "lobby") {
+      if (game.style.display !== "none") {
+        closePopup();
+      }
+      game.style.display = "none";
+      menu.style.display = "none";
+      lobbyLayer.style.display = "flex";
+      maybeShowMultiplayerWinner(room);
     }
   });
   lobbyLayer.style.display = "flex";
@@ -1373,6 +1382,26 @@ function renderLobby(room){
     </div>`;
   }).join("");
   lobbyStartBtn.disabled = hostId !== playerId;
+}
+
+function maybeShowMultiplayerWinner(room){
+  const winner = room?.lastWinner;
+  if (!winner || !winner.id) return;
+  if (lastShownWinnerId === winner.id) return;
+  lastShownWinnerId = winner.id;
+  popup(`
+    <div class="popup-icon">🏆</div>
+    <h2>${winner.name || "Jogador"} venceu!</h2>
+    <div style="display:flex;justify-content:center;align-items:center;gap:8px;margin:6px 0 10px 0;">
+      <span style="display:inline-block;width:14px;height:14px;border-radius:999px;background:${winner.color || "#888"};border:1px solid rgba(0,0,0,0.25);"></span>
+      <span style="font-weight:700;">Cor do jogador</span>
+    </div>
+    <div style="font-size:1.05em;line-height:1.55;text-align:center;">
+      ${winner.reason || "Objetivo alcançado."}<br>
+      Todos voltaram para o lobby da sala.
+    </div>
+    <button onclick="closePopup()" class="animated">OK</button>
+  `);
 }
 
 async function kickPlayer(targetPlayerId){
@@ -1469,9 +1498,11 @@ async function startRoomGame(){
   diceRolling = false;
   extraTurnPending = false;
   resetBoardState();
+  lastShownWinnerId = "";
   await roomRef(currentRoomCode).update({
     status: "playing",
     state: serializeGameState(),
+    lastWinner: null,
     startedAt: Date.now()
   });
 }
@@ -1540,7 +1571,7 @@ let lastDiceRoll=0;
 let diceRolling=false;
 
 // Visual palette for player tokens
-const colors=["#80b47a","#D22604","#3B45AC","#CFA23A"];
+const colors=["#80b47a","#D22604","#3B45AC","#CFA23A","#7D3AC1","#0F8B8D","#E76F51","#264653"];
 
 // ===== START =====
 function startGame(){
@@ -1849,15 +1880,17 @@ function drawBoard(){
     c.innerHTML+=`<span class="tile-index">${i}</span>`;
 
     if(tileObj.owner!==null){
+      const ownerPlayer = players[tileObj.owner];
+      const ownerColor = ownerPlayer?.color || colors[tileObj.owner % colors.length] || "#888";
       c.classList.add("owned-strong");
-      c.style.borderColor = colors[tileObj.owner];
+      c.style.borderColor = ownerColor;
       c.style.boxShadow =
-        `0 0 0 3px ${colors[tileObj.owner]}CC,` +
-        `0 0 0 6px ${colors[tileObj.owner]}55,` +
-        `0 12px 28px ${colors[tileObj.owner]}99,` +
-        `0 0 22px ${colors[tileObj.owner]}AA,` +
+        `0 0 0 3px ${ownerColor}CC,` +
+        `0 0 0 6px ${ownerColor}55,` +
+        `0 12px 28px ${ownerColor}99,` +
+        `0 0 22px ${ownerColor}AA,` +
         `inset 0 0 0 1px rgba(255,255,255,0.28)`;
-      c.appendChild(makeOwnerTag(colors[tileObj.owner]));
+      c.appendChild(makeOwnerTag(ownerColor));
     }
     if (
       tileObj.type === "prop" &&
@@ -2212,10 +2245,12 @@ function handleTile(p){
 
       window.buy=()=>{
         if (!canLocalPlayerAct()) return;
-        if(p.money>=tile.price){
-          p.money-=tile.price;
+        const activePlayer = players[current];
+        if(!activePlayer) return;
+        if(activePlayer.money>=tile.price){
+          activePlayer.money-=tile.price;
           tile.owner=current;
-          p.props.push(tile);
+          activePlayer.props.push(tile);
 
           Effects.moneyLose(tile.price, sidebar.children[current]);
           if(boardDiv.children.length>0){
@@ -2225,7 +2260,7 @@ function handleTile(p){
               burst.className="tile-highlight";
               cell.appendChild(burst);
               setTimeout(()=>burst.remove(),690);
-              Effects.propertyBought(cell, p.color);
+              Effects.propertyBought(cell, activePlayer.color);
             }
           }
         }
@@ -2262,8 +2297,21 @@ function handleTile(p){
 
       window.upgrade=()=>{
         if (!canLocalPlayerAct()) return;
+        const activePlayer = players[current];
+        if(!activePlayer) return;
+        if(activePlayer.money < 100){
+          popup(`
+            <div class="popup-icon">💸</div>
+            <h3>Saldo insuficiente</h3>
+            <div style="font-size:1.05em;line-height:1.55;text-align:left;">
+              Você precisa de <b>R$100</b> para melhorar esta propriedade.
+            </div>
+            <button onclick="endDecision()" class="animated">OK</button>
+          `);
+          return;
+        }
         tile.level++;
-        p.money-=100;
+        activePlayer.money-=100;
         Effects.moneyLose(100, sidebar.children[current]);
         syncMultiplayerState();
         endDecision();
@@ -2350,12 +2398,20 @@ function handleTile(p){
 }
 
 /*--- TURN ---*/
-function endDecision(){
+async function endDecision(){
   if (!canLocalPlayerAct()) return;
   closePopup();
   awaitingDecision=false;
 
-  checkVictory();
+  const winner = checkVictory();
+  if (winner) {
+    if (multiplayerMode) {
+      await finalizeMultiplayerVictory(winner);
+    } else {
+      showLocalVictory(winner);
+    }
+    return;
+  }
 
   if(!extraTurnPending){
     current=(current+1)%players.length;
@@ -2369,15 +2425,77 @@ function endDecision(){
 
 /*--- VITORIA ---*/
 function checkVictory(){
-  players.forEach(p=>{
-    if(p.money>=3000 || p.props.length>=10){
-      popup(
-        `<div class="popup-icon">🏆</div>
-        <h2>${p.name} venceu!</h2>
-        <div style="font-size:19px;color:var(--main-green-2);margin-top:8px;">Império Rural conquistado!</div>`
-      );
-      awaitingDecision=true;
+  for (let i=0;i<players.length;i++){
+    const p = players[i];
+    if(p.money>=3000){
+      return {
+        index: i,
+        playerId: p.playerId || ("player_" + i),
+        name: p.name,
+        color: p.color || colors[i % colors.length],
+        reason: "Atingiu R$3000 e conquistou o Império Rural!"
+      };
     }
+    if(p.props.length>=10){
+      return {
+        index: i,
+        playerId: p.playerId || ("player_" + i),
+        name: p.name,
+        color: p.color || colors[i % colors.length],
+        reason: "Conquistou 10 propriedades e dominou o tabuleiro!"
+      };
+    }
+  }
+  return null;
+}
+
+function showLocalVictory(winner){
+  awaitingDecision = true;
+  extraTurnPending = false;
+  drawBoard();
+  popup(
+    `<div class="popup-icon">🏆</div>
+    <h2>${winner.name} venceu!</h2>
+    <div style="display:flex;justify-content:center;align-items:center;gap:8px;margin:6px 0 10px 0;">
+      <span style="display:inline-block;width:14px;height:14px;border-radius:999px;background:${winner.color || "#888"};border:1px solid rgba(0,0,0,0.25);"></span>
+      <span style="font-weight:700;">Cor do jogador</span>
+    </div>
+    <div style="font-size:1.08em;line-height:1.55;text-align:center;">
+      ${winner.reason}
+    </div>
+    <button onclick="goToMenu()" class="animated">Voltar ao menu</button>`
+  );
+}
+
+async function finalizeMultiplayerVictory(winner){
+  if (!currentRoomCode || !ensureFirebase()) return;
+  awaitingDecision = true;
+  extraTurnPending = false;
+  drawBoard();
+  const winnerPayload = {
+    id: winner.playerId,
+    name: winner.name,
+    color: winner.color || "#888",
+    reason: winner.reason,
+    at: Date.now()
+  };
+  lastShownWinnerId = winnerPayload.id;
+  popup(`
+    <div class="popup-icon">🏆</div>
+    <h2>${winner.name} venceu!</h2>
+    <div style="display:flex;justify-content:center;align-items:center;gap:8px;margin:6px 0 10px 0;">
+      <span style="display:inline-block;width:14px;height:14px;border-radius:999px;background:${winner.color || "#888"};border:1px solid rgba(0,0,0,0.25);"></span>
+      <span style="font-weight:700;">Cor do jogador</span>
+    </div>
+    <div style="font-size:1.08em;line-height:1.55;text-align:center;">
+      ${winner.reason}<br>
+      Voltando todos para o lobby...
+    </div>
+  `);
+  await roomRef(currentRoomCode).update({
+    status: "lobby",
+    state: null,
+    lastWinner: winnerPayload
   });
 }
 
